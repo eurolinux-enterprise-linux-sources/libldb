@@ -9,7 +9,7 @@
 
 Name: libldb
 Version: 1.1.13
-Release: 3%{?dist}
+Release: 3%{?dist}.1
 Group: Development/Libraries
 Summary: A schema-less, ldap like, API and database
 Requires: libtalloc >= %{talloc_version}
@@ -43,6 +43,11 @@ Provides: bundled(libtdb_compat)
 
 # Patches
 Patch0001:  libldb-1.13-do-not-export-private-symbols.patch
+Patch0002:  ldb_canon_zero.patch
+Patch0003:  ldb_binary_cmp.patch
+Patch0004:  ldb_dn_escape_fix.patch
+Patch0005:  ldb_dn_escape_no_strlen.patch
+Patch0006:  ldb_dn_explode_no_strlen.patch
 
 %description
 An extensible library that implements an LDAP like API to access remote LDAP
@@ -88,6 +93,11 @@ Development files for the Python bindings for the LDB library
 %prep
 %setup -q -n ldb-%{version}
 %patch0001 -p1 -b .private
+%patch0002 -p3 -b .ldb_canon_zero
+%patch0003 -p3 -b .ldb_binary_cmp
+%patch0004 -p3 -b .ldb_dn_escape_fix
+%patch0005 -p3 -b .ldb_dn_escape_no_strlen
+%patch0006 -p3 -b .ldb_dn_explode_no_strlen
 
 %build
 
@@ -179,6 +189,12 @@ rm -rf %{buildroot}
 %postun -n pyldb -p /sbin/ldconfig
 
 %changelog
+* Mon Dec 14 2015 Jakub Hrozek <jhrozek@redhat.com> - 1.1.13-3.1
+- Resolves: rhbz#1290712 - CVE-2015-5330 libldb: samba: Remote memory read
+                           in Samba LDAP server [rhel-7.2.z]
+- Remove the patch from the previous commit, it doesn't fix a remotely
+  eploitable issue. Add patches from upstream #11636 instead.
+
 * Tue Nov 06 2012 Jakub Hrozek <jhrozek@redhat.com> - 1.1.13-3
 - use the proper %patch stanza to make rpmdiff happy
 - related: rhbz#873422 - LDB 1.1.13 exports improper ABI
