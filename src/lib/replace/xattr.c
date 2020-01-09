@@ -25,6 +25,7 @@
    License along with this library; if not, see <http://www.gnu.org/licenses/>.
 */
 
+#define UID_WRAPPER_NOT_REPLACE
 #include "replace.h"
 #include "system/filesys.h"
 #include "system/dir.h"
@@ -71,7 +72,9 @@ ssize_t rep_getxattr (const char *path, const char *name, void *value, size_t si
 	 * that the buffer is large enough to fit the returned value.
 	 */
 	if((retval=extattr_get_file(path, attrnamespace, attrname, NULL, 0)) >= 0) {
-		if(retval > size) {
+		if (size == 0) {
+			return retval;
+		} else if (retval > size) {
 			errno = ERANGE;
 			return -1;
 		}
@@ -88,6 +91,9 @@ ssize_t rep_getxattr (const char *path, const char *name, void *value, size_t si
 	if (strncmp(name, "system", 6) == 0) flags |= ATTR_ROOT;
 
 	retval = attr_get(path, attrname, (char *)value, &valuelength, flags);
+	if (size == 0 && retval == -1 && errno == E2BIG) {
+		return valuelength;
+	}
 
 	return retval ? retval : valuelength;
 #elif defined(HAVE_ATTROPEN)
@@ -126,7 +132,9 @@ ssize_t rep_fgetxattr (int filedes, const char *name, void *value, size_t size)
 	const char *attrname = ((s=strchr(name, '.')) == NULL) ? name : s + 1;
 
 	if((retval=extattr_get_fd(filedes, attrnamespace, attrname, NULL, 0)) >= 0) {
-		if(retval > size) {
+		if (size == 0) {
+			return retval;
+		} else if (retval > size) {
 			errno = ERANGE;
 			return -1;
 		}
@@ -143,7 +151,9 @@ ssize_t rep_fgetxattr (int filedes, const char *name, void *value, size_t size)
 	if (strncmp(name, "system", 6) == 0) flags |= ATTR_ROOT;
 
 	retval = attr_getf(filedes, attrname, (char *)value, &valuelength, flags);
-
+	if (size == 0 && retval == -1 && errno == E2BIG) {
+		return valuelength;
+	}
 	return retval ? retval : valuelength;
 #elif defined(HAVE_ATTROPEN)
 	ssize_t ret = -1;
@@ -185,6 +195,10 @@ static ssize_t bsd_attr_list (int type, extattr_arg arg, char *list, size_t size
 	char *buf;
 	/* Iterate through extattr(2) namespaces */
 	for(t = 0; t < ARRAY_SIZE(extattr); t++) {
+		if (t != EXTATTR_NAMESPACE_USER && geteuid() != 0) {
+			/* ignore all but user namespace when we are not root, see bug 10247 */
+			continue;
+		}
 		switch(type) {
 #if defined(HAVE_EXTATTR_LIST_FILE)
 			case 0:

@@ -4,6 +4,7 @@ BINDIR=$1
 
 if [ -n "$TEST_DATA_PREFIX" ]; then
 	LDB_URL="$TEST_DATA_PREFIX/tdbtest.ldb"
+	PYDESTDIR="$TEST_DATA_PREFIX"
 else
 	LDB_URL="tdbtest.ldb"
 fi

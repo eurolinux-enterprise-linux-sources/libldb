@@ -32,6 +32,7 @@ struct ltdb_private {
 	int read_lock_count;
 
 	bool warn_unindexed;
+	bool warn_reindex;
 };
 
 struct ltdb_context {
@@ -47,6 +48,9 @@ struct ltdb_context {
 	enum ldb_scope scope;
 	const char * const *attrs;
 	struct tevent_timer *timeout_event;
+
+	/* error handling */
+	int error;
 };
 
 /* special record types */
@@ -91,17 +95,6 @@ int ltdb_reindex(struct ldb_module *module);
 int ltdb_index_transaction_start(struct ldb_module *module);
 int ltdb_index_transaction_commit(struct ldb_module *module);
 int ltdb_index_transaction_cancel(struct ldb_module *module);
-
-/* The following definitions come from lib/ldb/ldb_tdb/ldb_pack.c  */
-
-int ltdb_pack_data(struct ldb_module *module,
-		   const struct ldb_message *message,
-		   TDB_DATA *data);
-void ltdb_unpack_data_free(struct ldb_module *module,
-			   struct ldb_message *message);
-int ltdb_unpack_data(struct ldb_module *module,
-		     const TDB_DATA *data,
-		     struct ldb_message *message);
 
 /* The following definitions come from lib/ldb/ldb_tdb/ldb_search.c  */
 

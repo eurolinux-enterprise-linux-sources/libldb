@@ -162,6 +162,8 @@ int ldb_match_msg_error(struct ldb_context *ldb,
 int ldb_match_msg_objectclass(const struct ldb_message *msg,
 			      const char *objectclass);
 
+int ldb_register_extended_match_rules(struct ldb_context *ldb);
+
 /* The following definitions come from lib/ldb/common/ldb_modules.c  */
 
 struct ldb_module *ldb_module_new(TALLOC_CTX *memctx,
@@ -368,5 +370,34 @@ int ldb_parse_tree_walk(struct ldb_parse_tree *tree,
 bool ldb_msg_element_equal_ordered(const struct ldb_message_element *el1,
 				   const struct ldb_message_element *el2);
 
+
+struct ldb_extended_match_rule
+{
+	const char *oid;
+	int (*callback)(struct ldb_context *, const char *oid,
+			const struct ldb_message *, const char *,
+			const struct ldb_val *, bool *);
+};
+
+int ldb_register_extended_match_rule(struct ldb_context *ldb,
+				     const struct ldb_extended_match_rule *rule);
+
+/*
+ * these pack/unpack functions are exposed in the library for use by
+ * ldb tools like ldbdump and for use in tests,
+ * but are not part of the public API
+ */
+int ldb_pack_data(struct ldb_context *ldb,
+		  const struct ldb_message *message,
+		  struct ldb_val *data);
+int ldb_unpack_data_only_attr_list(struct ldb_context *ldb,
+				   const struct ldb_val *data,
+				   struct ldb_message *message,
+				   const char* const * list,
+				   unsigned int list_size,
+				   unsigned int *nb_attributes_indb);
+int ldb_unpack_data(struct ldb_context *ldb,
+		    const struct ldb_val *data,
+		    struct ldb_message *message);
 
 #endif

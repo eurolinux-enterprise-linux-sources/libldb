@@ -50,6 +50,7 @@
  */
 
 #include "ldb_tdb.h"
+#include "ldb_private.h"
 #include <tdb.h>
 
 /*
@@ -228,7 +229,13 @@ static int ltdb_modified(struct ldb_module *module, struct ldb_dn *dn)
 
 	if (ldb_dn_is_special(dn) &&
 	    (ldb_dn_check_special(dn, LTDB_INDEXLIST) ||
-	     ldb_dn_check_special(dn, LTDB_ATTRIBUTES)) ) {
+	     ldb_dn_check_special(dn, LTDB_ATTRIBUTES)) )
+	{
+		if (ltdb->warn_reindex) {
+			ldb_debug(ldb_module_get_ctx(module),
+				LDB_DEBUG_ERROR, "Reindexing %s due to modification on %s",
+				tdb_name(ltdb->tdb), ldb_dn_get_linearized(dn));
+		}
 		ret = ltdb_reindex(module);
 	}
 
@@ -257,6 +264,7 @@ int ltdb_store(struct ldb_module *module, const struct ldb_message *msg, int flg
 	void *data = ldb_module_get_private(module);
 	struct ltdb_private *ltdb = talloc_get_type(data, struct ltdb_private);
 	TDB_DATA tdb_key, tdb_data;
+	struct ldb_val ldb_data;
 	int ret = LDB_SUCCESS;
 
 	tdb_key = ltdb_key(module, msg->dn);
@@ -264,11 +272,15 @@ int ltdb_store(struct ldb_module *module, const struct ldb_message *msg, int flg
 		return LDB_ERR_OTHER;
 	}
 
-	ret = ltdb_pack_data(module, msg, &tdb_data);
+	ret = ldb_pack_data(ldb_module_get_ctx(module),
+			    msg, &ldb_data);
 	if (ret == -1) {
 		talloc_free(tdb_key.dptr);
 		return LDB_ERR_OTHER;
 	}
+
+	tdb_data.dptr = ldb_data.data;
+	tdb_data.dsize = ldb_data.length;
 
 	ret = tdb_store(ltdb->tdb, tdb_key, tdb_data, flgs);
 	if (ret != 0) {
@@ -278,7 +290,7 @@ int ltdb_store(struct ldb_module *module, const struct ldb_message *msg, int flg
 
 done:
 	talloc_free(tdb_key.dptr);
-	talloc_free(tdb_data.dptr);
+	talloc_free(ldb_data.data);
 
 	return ret;
 }
@@ -665,6 +677,7 @@ int ltdb_modify_internal(struct ldb_module *module,
 	void *data = ldb_module_get_private(module);
 	struct ltdb_private *ltdb = talloc_get_type(data, struct ltdb_private);
 	TDB_DATA tdb_key, tdb_data;
+	struct ldb_val ldb_data;
 	struct ldb_message *msg2;
 	unsigned int i, j, k;
 	int ret = LDB_SUCCESS, idx;
@@ -693,7 +706,10 @@ int ltdb_modify_internal(struct ldb_module *module,
 		goto done;
 	}
 
-	ret = ltdb_unpack_data(module, &tdb_data, msg2);
+	ldb_data.data = tdb_data.dptr;
+	ldb_data.length = tdb_data.dsize;
+
+	ret = ldb_unpack_data(ldb_module_get_ctx(module), &ldb_data, msg2);
 	free(tdb_data.dptr);
 	if (ret == -1) {
 		ret = LDB_ERR_OTHER;
@@ -1552,15 +1568,22 @@ static int ltdb_connect(struct ldb_context *ldb, const char *url,
 				   ldb_get_create_perms(ldb), ldb);
 	if (!ltdb->tdb) {
 		ldb_asprintf_errstring(ldb,
-				       "Unable to open tdb '%s'", path);
+				       "Unable to open tdb '%s': %s", path, strerror(errno));
 		ldb_debug(ldb, LDB_DEBUG_ERROR,
-			  "Unable to open tdb '%s'", path);
+			  "Unable to open tdb '%s': %s", path, strerror(errno));
 		talloc_free(ltdb);
+		if (errno == EACCES || errno == EPERM) {
+			return LDB_ERR_INSUFFICIENT_ACCESS_RIGHTS;
+		}
 		return LDB_ERR_OPERATIONS_ERROR;
 	}
 
 	if (getenv("LDB_WARN_UNINDEXED")) {
 		ltdb->warn_unindexed = true;
+	}
+
+	if (getenv("LDB_WARN_REINDEX")) {
+		ltdb->warn_reindex = true;
 	}
 
 	ltdb->sequence_number = 0;

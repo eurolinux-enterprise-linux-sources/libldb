@@ -4,12 +4,12 @@
 %endif
 
 %define talloc_version 2.0.7
-%define tdb_version 1.2.10
+%define tdb_version 1.3.8
 %define tevent_version 0.9.15
 
 Name: libldb
-Version: 1.1.13
-Release: 3%{?dist}.1
+Version: 1.1.25
+Release: 2%{?dist}
 Group: Development/Libraries
 Summary: A schema-less, ldap like, API and database
 Requires: libtalloc >= %{talloc_version}
@@ -42,12 +42,6 @@ Provides: bundled(libreplace)
 Provides: bundled(libtdb_compat)
 
 # Patches
-Patch0001:  libldb-1.13-do-not-export-private-symbols.patch
-Patch0002:  ldb_canon_zero.patch
-Patch0003:  ldb_binary_cmp.patch
-Patch0004:  ldb_dn_escape_fix.patch
-Patch0005:  ldb_dn_escape_no_strlen.patch
-Patch0006:  ldb_dn_explode_no_strlen.patch
 
 %description
 An extensible library that implements an LDAP like API to access remote LDAP
@@ -77,7 +71,7 @@ Header files needed to develop programs that link against the LDB library.
 Group: Development/Libraries
 Summary: Python bindings for the LDB library
 Requires: libldb = %{version}-%{release}
-Requires: python-tdb = %{tdb_version}
+Requires: python-tdb >= %{tdb_version}
 
 %description -n pyldb
 Python bindings for the LDB library
@@ -92,12 +86,6 @@ Development files for the Python bindings for the LDB library
 
 %prep
 %setup -q -n ldb-%{version}
-%patch0001 -p1 -b .private
-%patch0002 -p3 -b .ldb_canon_zero
-%patch0003 -p3 -b .ldb_binary_cmp
-%patch0004 -p3 -b .ldb_dn_escape_fix
-%patch0005 -p3 -b .ldb_dn_escape_no_strlen
-%patch0006 -p3 -b .ldb_dn_explode_no_strlen
 
 %build
 
@@ -177,6 +165,7 @@ rm -rf %{buildroot}
 %defattr(-,root,root,-)
 %{python_sitearch}/ldb.so
 %{_libdir}/libpyldb-util.so.1*
+%{python_sitearch}/_ldb_text.py*
 
 %files -n pyldb-devel
 %defattr(-,root,root,-)
@@ -189,6 +178,14 @@ rm -rf %{buildroot}
 %postun -n pyldb -p /sbin/ldconfig
 
 %changelog
+* Mon Apr  4 2016 Jakub Hrozek <jhrozek@redhat.com> - 1.1.25-2
+- Fix the python-ldb requires
+- Related: rhbz#1322688
+
+* Mon Apr  4 2016 Jakub Hrozek <jhrozek@redhat.com> - 1.1.25-1
+- Rebase to upstream 1.1.25
+- Related: rhbz#1322688
+
 * Mon Dec 14 2015 Jakub Hrozek <jhrozek@redhat.com> - 1.1.13-3.1
 - Resolves: rhbz#1290712 - CVE-2015-5330 libldb: samba: Remote memory read
                            in Samba LDAP server [rhel-7.2.z]

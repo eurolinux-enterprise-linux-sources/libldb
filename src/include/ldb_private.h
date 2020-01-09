@@ -100,6 +100,12 @@ struct ldb_context {
 	/* debugging operations */
 	struct ldb_debug_ops debug_ops;
 
+	/* extended matching rules */
+	struct ldb_extended_match_entry {
+		const struct ldb_extended_match_rule *rule;
+		struct ldb_extended_match_entry *prev, *next;
+	} *extended_match_rules;
+
 	/* custom utf8 functions */
 	struct ldb_utf8_fns utf8_fns;
 
@@ -193,5 +199,13 @@ struct ldb_ldif *ldb_ldif_read_file_state(struct ldb_context *ldb,
 
 char *ldb_ldif_write_redacted_trace_string(struct ldb_context *ldb, TALLOC_CTX *mem_ctx, 
 					   const struct ldb_ldif *ldif);
+
+/*
+ * Get the LDB context in use on an LDB DN.
+ *
+ * This is helpful to the python LDB code, which may use as part of
+ * adding base and child components to an existing DN.
+ */
+struct ldb_context *ldb_dn_get_ldb_context(struct ldb_dn *dn);
 
 #endif
