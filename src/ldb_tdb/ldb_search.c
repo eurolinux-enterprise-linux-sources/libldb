@@ -102,12 +102,105 @@ static int msg_add_distinguished_name(struct ldb_message *msg)
 	el.values = &val;
 	el.flags = 0;
 	val.data = (uint8_t *)ldb_dn_alloc_linearized(msg, msg->dn);
-	if (val.data == NULL) {
+	val.length = strlen((char *)val.data);
+	
+	ret = msg_add_element(msg, &el, 1);
+	return ret;
+}
+
+/*
+  add all elements from one message into another
+ */
+static int msg_add_all_elements(struct ldb_module *module, struct ldb_message *ret,
+				const struct ldb_message *msg)
+{
+	struct ldb_context *ldb;
+	unsigned int i;
+	int check_duplicates = (ret->num_elements != 0);
+
+	ldb = ldb_module_get_ctx(module);
+
+	if (msg_add_distinguished_name(ret) != 0) {
 		return -1;
 	}
-	val.length = strlen((char *)val.data);
 
-	ret = msg_add_element(msg, &el, 1);
+	for (i=0;i<msg->num_elements;i++) {
+		const struct ldb_schema_attribute *a;
+		a = ldb_schema_attribute_by_name(ldb, msg->elements[i].name);
+		if (a->flags & LDB_ATTR_FLAG_HIDDEN) {
+			continue;
+		}
+		if (msg_add_element(ret, &msg->elements[i],
+				    check_duplicates) != 0) {
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+
+/*
+  pull the specified list of attributes from a message
+ */
+static struct ldb_message *ltdb_pull_attrs(struct ldb_module *module, 
+					   TALLOC_CTX *mem_ctx, 
+					   const struct ldb_message *msg, 
+					   const char * const *attrs)
+{
+	struct ldb_message *ret;
+	unsigned int i;
+
+	ret = talloc(mem_ctx, struct ldb_message);
+	if (!ret) {
+		return NULL;
+	}
+
+	ret->dn = ldb_dn_copy(ret, msg->dn);
+	if (!ret->dn) {
+		talloc_free(ret);
+		return NULL;
+	}
+
+	ret->num_elements = 0;
+	ret->elements = NULL;
+
+	if (!attrs) {
+		if (msg_add_all_elements(module, ret, msg) != 0) {
+			talloc_free(ret);
+			return NULL;
+		}
+		return ret;
+	}
+
+	for (i=0;attrs[i];i++) {
+		struct ldb_message_element *el;
+
+		if (strcmp(attrs[i], "*") == 0) {
+			if (msg_add_all_elements(module, ret, msg) != 0) {
+				talloc_free(ret);
+				return NULL;
+			}
+			continue;
+		}
+
+		if (ldb_attr_cmp(attrs[i], "distinguishedName") == 0) {
+			if (msg_add_distinguished_name(ret) != 0) {
+				return NULL;
+			}
+			continue;
+		}
+
+		el = ldb_msg_find_element(msg, attrs[i]);
+		if (!el) {
+			continue;
+		}
+		if (msg_add_element(ret, el, 1) != 0) {
+			talloc_free(ret);
+			return NULL;				
+		}
+	}
+
 	return ret;
 }
 
@@ -116,61 +209,26 @@ static int msg_add_distinguished_name(struct ldb_message *msg)
   return LDB_ERR_NO_SUCH_OBJECT on record-not-found
   and LDB_SUCCESS on success
 */
-int ltdb_search_base(struct ldb_module *module,
-		     TALLOC_CTX *mem_ctx,
-		     struct ldb_dn *dn,
-		     struct ldb_dn **ret_dn)
+static int ltdb_search_base(struct ldb_module *module, struct ldb_dn *dn)
 {
+	void *data = ldb_module_get_private(module);
+	struct ltdb_private *ltdb = talloc_get_type(data, struct ltdb_private);
+	TDB_DATA tdb_key;
 	int exists;
-	int ret;
-	struct ldb_message *msg = NULL;
 
 	if (ldb_dn_is_null(dn)) {
 		return LDB_ERR_NO_SUCH_OBJECT;
 	}
 
-	/*
-	 * We can't use tdb_exists() directly on a key when the TDB
-	 * key is the GUID one, not the DN based one.  So we just do a
-	 * normal search and avoid most of the allocation with the
-	 * LDB_UNPACK_DATA_FLAG_NO_DN and
-	 * LDB_UNPACK_DATA_FLAG_NO_ATTRS flags
-	 */
-	msg = ldb_msg_new(module);
-	if (msg == NULL) {
+	/* form the key */
+	tdb_key = ltdb_key(module, dn);
+	if (!tdb_key.dptr) {
 		return LDB_ERR_OPERATIONS_ERROR;
 	}
 
-	ret = ltdb_search_dn1(module, dn,
-			      msg,
-			      LDB_UNPACK_DATA_FLAG_NO_ATTRS);
-	if (ret == LDB_SUCCESS) {
-		const char *dn_linearized
-			= ldb_dn_get_linearized(dn);
-		const char *msg_dn_linearlized
-			= ldb_dn_get_linearized(msg->dn);
-
-		if (strcmp(dn_linearized, msg_dn_linearlized) == 0) {
-			/*
-			 * Re-use the full incoming DN for
-			 * subtree checks
-			 */
-			*ret_dn = dn;
-		} else {
-			/*
-			 * Use the string DN from the unpack, so that
-			 * we have a case-exact match of the base
-			 */
-			*ret_dn = talloc_steal(mem_ctx, msg->dn);
-		}
-		exists = true;
-	} else if (ret == LDB_ERR_NO_SUCH_OBJECT) {
-		exists = false;
-	} else {
-		talloc_free(msg);
-		return ret;
-	}
-	talloc_free(msg);
+	exists = tdb_exists(ltdb->tdb, tdb_key);
+	talloc_free(tdb_key.dptr);
+		
 	if (exists) {
 		return LDB_SUCCESS;
 	}
@@ -180,51 +238,19 @@ int ltdb_search_base(struct ldb_module *module,
 struct ltdb_parse_data_unpack_ctx {
 	struct ldb_message *msg;
 	struct ldb_module *module;
-	unsigned int unpack_flags;
 };
 
-static int ltdb_parse_data_unpack(struct ldb_val key,
-				  struct ldb_val data,
+static int ltdb_parse_data_unpack(TDB_DATA key, TDB_DATA data,
 				  void *private_data)
 {
 	struct ltdb_parse_data_unpack_ctx *ctx = private_data;
-	unsigned int nb_elements_in_db;
-	int ret;
+
 	struct ldb_context *ldb = ldb_module_get_ctx(ctx->module);
-	struct ldb_val data_parse = data;
-
-	if (ctx->unpack_flags & LDB_UNPACK_DATA_FLAG_NO_DATA_ALLOC) {
-		/*
-		 * If we got LDB_UNPACK_DATA_FLAG_NO_DATA_ALLOC
-		 * we need at least do a memdup on the whole
-		 * data buffer as that may change later
-		 * and the caller needs a stable result.
-		 */
-		data_parse.data = talloc_memdup(ctx->msg,
-						data.data,
-						data.length);
-		if (data_parse.data == NULL) {
-			ldb_debug(ldb, LDB_DEBUG_ERROR,
-				  "Unable to allocate data(%d) for %*.*s\n",
-				  (int)data.length,
-				  (int)key.length, (int)key.length, key.data);
-			return LDB_ERR_OPERATIONS_ERROR;
-		}
-	}
-
-	ret = ldb_unpack_data_only_attr_list_flags(ldb, &data_parse,
-						   ctx->msg,
-						   NULL, 0,
-						   ctx->unpack_flags,
-						   &nb_elements_in_db);
+	int ret = ldb_unpack_data(ldb, (struct ldb_val *)&data, ctx->msg);
 	if (ret == -1) {
-		if (data_parse.data != data.data) {
-			talloc_free(data_parse.data);
-		}
-
 		ldb_debug(ldb, LDB_DEBUG_ERROR, "Invalid data for index %*.*s\n",
-			  (int)key.length, (int)key.length, key.data);
-		return LDB_ERR_OPERATIONS_ERROR;
+			  (int)key.dsize, (int)key.dsize, key.dptr);
+		return LDB_ERR_OPERATIONS_ERROR;		
 	}
 	return ret;
 }
@@ -236,288 +262,184 @@ static int ltdb_parse_data_unpack(struct ldb_val key,
   return LDB_ERR_NO_SUCH_OBJECT on record-not-found
   and LDB_SUCCESS on success
 */
-int ltdb_search_key(struct ldb_module *module, struct ltdb_private *ltdb,
-		    const struct TDB_DATA tdb_key,
-		    struct ldb_message *msg,
-		    unsigned int unpack_flags)
+int ltdb_search_dn1(struct ldb_module *module, struct ldb_dn *dn, struct ldb_message *msg)
 {
+	void *data = ldb_module_get_private(module);
+	struct ltdb_private *ltdb = talloc_get_type(data, struct ltdb_private);
 	int ret;
+	TDB_DATA tdb_key;
 	struct ltdb_parse_data_unpack_ctx ctx = {
 		.msg = msg,
-		.module = module,
-		.unpack_flags = unpack_flags
+		.module = module
 	};
-	struct ldb_val ldb_key = {
-		.data = tdb_key.dptr,
-		.length = tdb_key.dsize
-	};
+
+	/* form the key */
+	tdb_key = ltdb_key(module, dn);
+	if (!tdb_key.dptr) {
+		return LDB_ERR_OPERATIONS_ERROR;
+	}
 
 	memset(msg, 0, sizeof(*msg));
 
 	msg->num_elements = 0;
 	msg->elements = NULL;
 
-	ret = ltdb->kv_ops->fetch_and_parse(ltdb, ldb_key,
-					    ltdb_parse_data_unpack, &ctx);
-
+	ret = tdb_parse_record(ltdb->tdb, tdb_key, 
+			       ltdb_parse_data_unpack, &ctx); 
+	talloc_free(tdb_key.dptr);
+	
 	if (ret == -1) {
-		ret = ltdb->kv_ops->error(ltdb);
-		if (ret == LDB_SUCCESS) {
-			/*
-			 * Just to be sure we don't turn errors
-			 * into success
-			 */
-			return LDB_ERR_OPERATIONS_ERROR;
+		if (tdb_error(ltdb->tdb) == TDB_ERR_NOEXIST) {
+			return LDB_ERR_NO_SUCH_OBJECT;
 		}
-		return ret;
+		return LDB_ERR_OPERATIONS_ERROR;
 	} else if (ret != LDB_SUCCESS) {
 		return ret;
 	}
+	
+	if (!msg->dn) {
+		msg->dn = ldb_dn_copy(msg, dn);
+	}
+	if (!msg->dn) {
+		return LDB_ERR_OPERATIONS_ERROR;
+	}
 
 	return LDB_SUCCESS;
 }
 
 /*
-  search the database for a single simple dn, returning all attributes
-  in a single message
-
-  return LDB_ERR_NO_SUCH_OBJECT on record-not-found
-  and LDB_SUCCESS on success
+  add a set of attributes from a record to a set of results
+  return 0 on success, -1 on failure
 */
-int ltdb_search_dn1(struct ldb_module *module, struct ldb_dn *dn, struct ldb_message *msg,
-		    unsigned int unpack_flags)
+int ltdb_add_attr_results(struct ldb_module *module, 
+			  TALLOC_CTX *mem_ctx, 
+			  struct ldb_message *msg,
+			  const char * const attrs[], 
+			  unsigned int *count, 
+			  struct ldb_message ***res)
 {
-	void *data = ldb_module_get_private(module);
-	struct ltdb_private *ltdb = talloc_get_type(data, struct ltdb_private);
-	int ret;
-	uint8_t guid_key[LTDB_GUID_KEY_SIZE];
-	TDB_DATA tdb_key = {
-		.dptr = guid_key,
-		.dsize = sizeof(guid_key)
-	};
-	TALLOC_CTX *tdb_key_ctx = NULL;
+	struct ldb_message *msg2;
+	struct ldb_message **res2;
 
-	bool valid_dn = ldb_dn_validate(dn);
-	if (valid_dn == false) {
-		ldb_asprintf_errstring(ldb_module_get_ctx(module),
-				       "Invalid Base DN: %s",
-				       ldb_dn_get_linearized(dn));
-		return LDB_ERR_INVALID_DN_SYNTAX;
+	/* pull the attributes that the user wants */
+	msg2 = ltdb_pull_attrs(module, mem_ctx, msg, attrs);
+	if (!msg2) {
+		return -1;
 	}
 
-	if (ltdb->cache->GUID_index_attribute == NULL ||
-		ldb_dn_is_special(dn)) {
-
-		tdb_key_ctx = talloc_new(msg);
-		if (!tdb_key_ctx) {
-			return ldb_module_oom(module);
-		}
-
-		/* form the key */
-		tdb_key = ltdb_key_dn(module, tdb_key_ctx, dn);
-		if (!tdb_key.dptr) {
-			TALLOC_FREE(tdb_key_ctx);
-			return LDB_ERR_OPERATIONS_ERROR;
-		}
-	} else {
-		/*
-		 * Look in the index to find the key for this DN.
-		 *
-		 * the tdb_key memory is allocated above, msg is just
-		 * used for internal memory.
-		 *
-		 */
-		ret = ltdb_key_dn_from_idx(module, ltdb,
-					   msg,
-					   dn, &tdb_key);
-		if (ret != LDB_SUCCESS) {
-			return ret;
-		}
+	/* add to the results list */
+	res2 = talloc_realloc(mem_ctx, *res, struct ldb_message *, (*count)+2);
+	if (!res2) {
+		talloc_free(msg2);
+		return -1;
 	}
 
-	ret = ltdb_search_key(module, ltdb, tdb_key, msg, unpack_flags);
+	(*res) = res2;
 
-	TALLOC_FREE(tdb_key_ctx);
+	(*res)[*count] = talloc_move(*res, &msg2);
+	(*res)[(*count)+1] = NULL;
+	(*count)++;
 
-	if (ret != LDB_SUCCESS) {
-		return ret;
-	}
-
-	if ((unpack_flags & LDB_UNPACK_DATA_FLAG_NO_DN) == 0) {
-		if (!msg->dn) {
-			msg->dn = ldb_dn_copy(msg, dn);
-		}
-		if (!msg->dn) {
-			return LDB_ERR_OPERATIONS_ERROR;
-		}
-	}
-
-	return LDB_SUCCESS;
+	return 0;
 }
+
+
 
 /*
   filter the specified list of attributes from a message
-  removing not requested attrs from the new message constructed.
-
-  The reason this makes a new message is that the old one may not be
-  individually allocated, which is what our callers expect.
-
+  removing not requested attrs.
  */
-int ltdb_filter_attrs(TALLOC_CTX *mem_ctx,
-		      const struct ldb_message *msg, const char * const *attrs,
-		      struct ldb_message **filtered_msg)
+int ltdb_filter_attrs(struct ldb_message *msg, const char * const *attrs)
 {
 	unsigned int i;
-	bool keep_all = false;
-	bool add_dn = false;
+	int keep_all = 0;
+	struct ldb_message_element *el2;
 	uint32_t num_elements;
-	uint32_t elements_size;
-	struct ldb_message *msg2;
-
-	msg2 = ldb_msg_new(mem_ctx);
-	if (msg2 == NULL) {
-		goto failed;
-	}
-
-	msg2->dn = ldb_dn_copy(msg2, msg->dn);
-	if (msg2->dn == NULL) {
-		goto failed;
-	}
 
 	if (attrs) {
 		/* check for special attrs */
 		for (i = 0; attrs[i]; i++) {
-			int cmp = strcmp(attrs[i], "*");
-			if (cmp == 0) {
-				keep_all = true;
+			if (strcmp(attrs[i], "*") == 0) {
+				keep_all = 1;
 				break;
 			}
-			cmp = ldb_attr_cmp(attrs[i], "distinguishedName");
-			if (cmp == 0) {
-				add_dn = true;
+
+			if (ldb_attr_cmp(attrs[i], "distinguishedName") == 0) {
+				if (msg_add_distinguished_name(msg) != 0) {
+					return -1;
+				}
 			}
 		}
 	} else {
-		keep_all = true;
+		keep_all = 1;
 	}
-
+	
 	if (keep_all) {
-		add_dn = true;
-		elements_size = msg->num_elements + 1;
-
-	/* Shortcuts for the simple cases */
-	} else if (add_dn && i == 1) {
-		if (msg_add_distinguished_name(msg2) != 0) {
-			goto failed;
+		if (msg_add_distinguished_name(msg) != 0) {
+			return -1;
 		}
-		*filtered_msg = msg2;
 		return 0;
-	} else if (i == 0) {
-		*filtered_msg = msg2;
-		return 0;
-
-	/* Otherwise we are copying at most as many element as we have attributes */
-	} else {
-		elements_size = i;
 	}
 
-	msg2->elements = talloc_array(msg2, struct ldb_message_element,
-				      elements_size);
-	if (msg2->elements == NULL) goto failed;
-
+	el2 = talloc_array(msg, struct ldb_message_element, msg->num_elements);
+	if (el2 == NULL) {
+		return -1;
+	}
 	num_elements = 0;
 
 	for (i = 0; i < msg->num_elements; i++) {
-		struct ldb_message_element *el = &msg->elements[i];
-		struct ldb_message_element *el2 = &msg2->elements[num_elements];
 		unsigned int j;
+		int found = 0;
+		
+		for (j = 0; attrs[j]; j++) {
+			if (ldb_attr_cmp(msg->elements[i].name, attrs[j]) == 0) {
+				found = 1;
+				break;
+			}
+		}
 
-		if (keep_all == false) {
-			bool found = false;
-			for (j = 0; attrs[j]; j++) {
-				int cmp = ldb_attr_cmp(el->name, attrs[j]);
-				if (cmp == 0) {
-					found = true;
-					break;
-				}
-			}
-			if (found == false) {
-				continue;
-			}
-		}
-		*el2 = *el;
-		el2->name = talloc_strdup(msg2->elements, el->name);
-		if (el2->name == NULL) {
-			goto failed;
-		}
-		el2->values = talloc_array(msg2->elements, struct ldb_val, el->num_values);
-		if (el2->values == NULL) {
-			goto failed;
-		}
-		for (j=0;j<el->num_values;j++) {
-			el2->values[j] = ldb_val_dup(el2->values, &el->values[j]);
-			if (el2->values[j].data == NULL && el->values[j].length != 0) {
-				goto failed;
-			}
-		}
-		num_elements++;
-
-		/* Pidginhole principle: we can't have more elements
-		 * than the number of attributes if they are unique in
-		 * the DB */
-		if (num_elements > elements_size) {
-			goto failed;
+		if (found) {
+			el2[num_elements] = msg->elements[i];
+			talloc_steal(el2, el2[num_elements].name);
+			talloc_steal(el2, el2[num_elements].values);
+			num_elements++;
 		}
 	}
 
-	msg2->num_elements = num_elements;
+	talloc_free(msg->elements);
 
-	if (add_dn) {
-		if (msg_add_distinguished_name(msg2) != 0) {
-			goto failed;
-		}
-	}
-
-	if (msg2->num_elements > 0) {
-		msg2->elements = talloc_realloc(msg2, msg2->elements,
-						struct ldb_message_element,
-						msg2->num_elements);
-		if (msg2->elements == NULL) {
-			goto failed;
-		}
+	if (num_elements > 0) {
+		msg->elements = talloc_realloc(msg, el2, struct ldb_message_element,
+					       num_elements);
 	} else {
-		talloc_free(msg2->elements);
-		msg2->elements = NULL;
+		msg->elements = talloc_array(msg, struct ldb_message_element, 0);
+		talloc_free(el2);
+	}
+	if (msg->elements == NULL) {
+		return -1;
 	}
 
-	*filtered_msg = msg2;
+	msg->num_elements = num_elements;
 
 	return 0;
-failed:
-	TALLOC_FREE(msg2);
-	return -1;
 }
 
 /*
   search function for a non-indexed search
  */
-static int search_func(struct ltdb_private *ltdb, struct ldb_val key, struct ldb_val val, void *state)
+static int search_func(struct tdb_context *tdb, TDB_DATA key, TDB_DATA data, void *state)
 {
 	struct ldb_context *ldb;
 	struct ltdb_context *ac;
-	struct ldb_message *msg, *filtered_msg;
+	struct ldb_message *msg;
 	int ret;
 	bool matched;
-	unsigned int nb_elements_in_db;
-	TDB_DATA tdb_key = {
-		.dptr = key.data,
-		.dsize = key.length
-	};
 
 	ac = talloc_get_type(state, struct ltdb_context);
 	ldb = ldb_module_get_ctx(ac->module);
 
-	if (ltdb_key_is_record(tdb_key) == false) {
+	if (key.dsize < 4 || 
+	    strncmp((char *)key.dptr, "DN=", 3) != 0) {
 		return 0;
 	}
 
@@ -528,12 +450,7 @@ static int search_func(struct ltdb_private *ltdb, struct ldb_val key, struct ldb
 	}
 
 	/* unpack the record */
-	ret = ldb_unpack_data_only_attr_list_flags(ldb, &val,
-						   msg,
-						   NULL, 0,
-						   LDB_UNPACK_DATA_FLAG_NO_DATA_ALLOC|
-						   LDB_UNPACK_DATA_FLAG_NO_VALUES_ALLOC,
-						   &nb_elements_in_db);
+	ret = ldb_unpack_data(ldb, (struct ldb_val *)&data, msg);
 	if (ret == -1) {
 		talloc_free(msg);
 		ac->error = LDB_ERR_OPERATIONS_ERROR;
@@ -542,7 +459,7 @@ static int search_func(struct ltdb_private *ltdb, struct ldb_val key, struct ldb
 
 	if (!msg->dn) {
 		msg->dn = ldb_dn_new(msg, ldb,
-				     (char *)key.data + 3);
+				     (char *)key.dptr + 3);
 		if (msg->dn == NULL) {
 			talloc_free(msg);
 			ac->error = LDB_ERR_OPERATIONS_ERROR;
@@ -564,15 +481,15 @@ static int search_func(struct ltdb_private *ltdb, struct ldb_val key, struct ldb
 	}
 
 	/* filter the attributes that the user wants */
-	ret = ltdb_filter_attrs(ac, msg, ac->attrs, &filtered_msg);
-	talloc_free(msg);
+	ret = ltdb_filter_attrs(msg, ac->attrs);
 
 	if (ret == -1) {
+		talloc_free(msg);
 		ac->error = LDB_ERR_OPERATIONS_ERROR;
 		return -1;
 	}
 
-	ret = ldb_module_send_entry(ac->req, filtered_msg, NULL);
+	ret = ldb_module_send_entry(ac->req, msg, NULL);
 	if (ret != LDB_SUCCESS) {
 		ac->request_terminated = true;
 		/* the callback failed, abort the operation */
@@ -595,113 +512,17 @@ static int ltdb_search_full(struct ltdb_context *ctx)
 	int ret;
 
 	ctx->error = LDB_SUCCESS;
-	ret = ltdb->kv_ops->iterate(ltdb, search_func, ctx);
+	if (ltdb->in_transaction != 0) {
+		ret = tdb_traverse(ltdb->tdb, search_func, ctx);
+	} else {
+		ret = tdb_traverse_read(ltdb->tdb, search_func, ctx);
+	}
 
 	if (ret < 0) {
 		return LDB_ERR_OPERATIONS_ERROR;
 	}
 
 	return ctx->error;
-}
-
-static int ltdb_search_and_return_base(struct ltdb_private *ltdb,
-				       struct ltdb_context *ctx)
-{
-	struct ldb_message *msg, *filtered_msg;
-	struct ldb_context *ldb = ldb_module_get_ctx(ctx->module);
-	const char *dn_linearized;
-	const char *msg_dn_linearlized;
-	int ret;
-	bool matched;
-
-	msg = ldb_msg_new(ctx);
-	if (!msg) {
-		return LDB_ERR_OPERATIONS_ERROR;
-	}
-	ret = ltdb_search_dn1(ctx->module, ctx->base, msg,
-			      LDB_UNPACK_DATA_FLAG_NO_DATA_ALLOC|
-			      LDB_UNPACK_DATA_FLAG_NO_VALUES_ALLOC);
-
-	if (ret == LDB_ERR_NO_SUCH_OBJECT) {
-		if (ltdb->check_base == false) {
-			/*
-			 * In this case, we are done, as no base
-			 * checking is allowed in this DB
-			 */
-			talloc_free(msg);
-			return LDB_SUCCESS;
-		}
-		ldb_asprintf_errstring(ldb,
-				       "No such Base DN: %s",
-				       ldb_dn_get_linearized(ctx->base));
-	}
-	if (ret != LDB_SUCCESS) {
-		talloc_free(msg);
-		return ret;
-	}
-
-
-	/*
-	 * We use this, not ldb_match_msg_error() as we know
-	 * we matched on the scope BASE, as we just fetched
-	 * the base DN
-	 */
-
-	ret = ldb_match_message(ldb, msg,
-				ctx->tree,
-				ctx->scope,
-				&matched);
-	if (ret != LDB_SUCCESS) {
-		talloc_free(msg);
-		return ret;
-	}
-	if (!matched) {
-		talloc_free(msg);
-		return LDB_SUCCESS;
-	}
-
-	dn_linearized = ldb_dn_get_linearized(ctx->base);
-	msg_dn_linearlized = ldb_dn_get_linearized(msg->dn);
-
-	if (strcmp(dn_linearized, msg_dn_linearlized) == 0) {
-		/*
-		 * If the DN is exactly the same string, then
-		 * re-use the full incoming DN for the
-		 * returned result, as it has already been
-		 * casefolded
-		 */
-		msg->dn = ctx->base;
-	}
-
-	/*
-	 * filter the attributes that the user wants.
-	 *
-	 * This copies msg->dn including the casefolding, so the above
-	 * assignment is safe
-	 */
-	ret = ltdb_filter_attrs(ctx, msg, ctx->attrs, &filtered_msg);
-
-	/*
-	 * Remove any extended components possibly copied in from
-	 * msg->dn, we just want the casefold components
-	 */
-	ldb_dn_remove_extended_components(filtered_msg->dn);
-	talloc_free(msg);
-
-	if (ret == -1) {
-		return LDB_ERR_OPERATIONS_ERROR;
-	}
-
-	ret = ldb_module_send_entry(ctx->req, filtered_msg, NULL);
-	if (ret != LDB_SUCCESS) {
-		/* Regardless of success or failure, the msg
-		 * is the callbacks responsiblity, and should
-		 * not be talloc_free()'ed */
-		ctx->request_terminated = true;
-		return ret;
-	}
-
-	return LDB_SUCCESS;
 }
 
 /*
@@ -721,24 +542,19 @@ int ltdb_search(struct ltdb_context *ctx)
 
 	ldb_request_set_state(req, LDB_ASYNC_PENDING);
 
-	if (ltdb->kv_ops->lock_read(module) != 0) {
+	if (ltdb_lock_read(module) != 0) {
 		return LDB_ERR_OPERATIONS_ERROR;
 	}
 
 	if (ltdb_cache_load(module) != 0) {
-		ltdb->kv_ops->unlock_read(module);
+		ltdb_unlock_read(module);
 		return LDB_ERR_OPERATIONS_ERROR;
 	}
 
 	if (req->op.search.tree == NULL) {
-		ltdb->kv_ops->unlock_read(module);
+		ltdb_unlock_read(module);
 		return LDB_ERR_OPERATIONS_ERROR;
 	}
-
-	ctx->tree = req->op.search.tree;
-	ctx->scope = req->op.search.scope;
-	ctx->base = req->op.search.base;
-	ctx->attrs = req->op.search.attrs;
 
 	if ((req->op.search.base == NULL) || (ldb_dn_is_null(req->op.search.base) == true)) {
 
@@ -767,31 +583,9 @@ int ltdb_search(struct ltdb_context *ctx)
 				       ldb_dn_get_linearized(req->op.search.base));
 		ret = LDB_ERR_INVALID_DN_SYNTAX;
 
-	} else if (req->op.search.scope == LDB_SCOPE_BASE) {
-
-		/*
-		 * If we are LDB_SCOPE_BASE, do just one search and
-		 * return early.  This is critical to ensure we do not
-		 * go into the index code for special DNs, as that
-		 * will try to look up an index record for a special
-		 * record (which doesn't exist).
-		 */
-		ret = ltdb_search_and_return_base(ltdb, ctx);
-
-		ltdb->kv_ops->unlock_read(module);
-
-		return ret;
-
 	} else if (ltdb->check_base) {
-		/*
-		 * This database has been marked as
-		 * 'checkBaseOnSearch', so do a spot check of the base
-		 * dn.  Also optimise the subsequent filter by filling
-		 * in the ctx->base to be exactly case correct
-		 */
-		ret = ltdb_search_base(module, ctx,
-				       req->op.search.base,
-				       &ctx->base);
+		/* This database has been marked as 'checkBaseOnSearch', so do a spot check of the base dn */
+		ret = ltdb_search_base(module, req->op.search.base);
 		
 		if (ret == LDB_ERR_NO_SUCH_OBJECT) {
 			ldb_asprintf_errstring(ldb, 
@@ -799,18 +593,15 @@ int ltdb_search(struct ltdb_context *ctx)
 					       ldb_dn_get_linearized(req->op.search.base));
 		}
 			
-	} else if (ldb_dn_validate(req->op.search.base) == false) {
-
-		/* We don't want invalid base DNs here */
-		ldb_asprintf_errstring(ldb,
-				       "Invalid Base DN: %s",
-				       ldb_dn_get_linearized(req->op.search.base));
-		ret = LDB_ERR_INVALID_DN_SYNTAX;
-
 	} else {
 		/* If we are not checking the base DN life is easy */
 		ret = LDB_SUCCESS;
 	}
+
+	ctx->tree = req->op.search.tree;
+	ctx->scope = req->op.search.scope;
+	ctx->base = req->op.search.base;
+	ctx->attrs = req->op.search.attrs;
 
 	if (ret == LDB_SUCCESS) {
 		uint32_t match_count = 0;
@@ -826,7 +617,7 @@ int ltdb_search(struct ltdb_context *ctx)
 		 * callback error */
 		if ( ! ctx->request_terminated && ret != LDB_SUCCESS) {
 			/* Not indexed, so we need to do a full scan */
-			if (ltdb->warn_unindexed || ltdb->disable_full_db_scan) {
+			if (ltdb->warn_unindexed) {
 				/* useful for debugging when slow performance
 				 * is caused by unindexed searches */
 				char *expression = ldb_filter_from_tree(ctx, ctx->tree);
@@ -839,7 +630,6 @@ int ltdb_search(struct ltdb_context *ctx)
 
 				talloc_free(expression);
 			}
-
 			if (match_count != 0) {
 				/* the indexing code gave an error
 				 * after having returned at least one
@@ -849,17 +639,9 @@ int ltdb_search(struct ltdb_context *ctx)
 				 * full search or we may return
 				 * duplicate entries
 				 */
-				ltdb->kv_ops->unlock_read(module);
+				ltdb_unlock_read(module);
 				return LDB_ERR_OPERATIONS_ERROR;
 			}
-
-			if (ltdb->disable_full_db_scan) {
-				ldb_set_errstring(ldb,
-						  "ldb FULL SEARCH disabled");
-				ltdb->kv_ops->unlock_read(module);
-				return LDB_ERR_INAPPROPRIATE_MATCHING;
-			}
-
 			ret = ltdb_search_full(ctx);
 			if (ret != LDB_SUCCESS) {
 				ldb_set_errstring(ldb, "Indexed and full searches both failed!\n");
@@ -867,7 +649,7 @@ int ltdb_search(struct ltdb_context *ctx)
 		}
 	}
 
-	ltdb->kv_ops->unlock_read(module);
+	ltdb_unlock_read(module);
 
 	return ret;
 }

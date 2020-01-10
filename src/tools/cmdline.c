@@ -93,10 +93,9 @@ static bool add_control(TALLOC_CTX *mem_ctx, const char *control)
 /**
   process command line options
 */
-static struct ldb_cmdline *ldb_cmdline_process_internal(struct ldb_context *ldb,
+struct ldb_cmdline *ldb_cmdline_process(struct ldb_context *ldb, 
 					int argc, const char **argv,
-					void (*usage)(struct ldb_context *),
-					bool search)
+					void (*usage)(struct ldb_context *))
 {
 	struct ldb_cmdline *ret=NULL;
 	poptContext pc;
@@ -279,12 +278,8 @@ static struct ldb_cmdline *ldb_cmdline_process_internal(struct ldb_context *ldb,
 		flags |= LDB_FLG_NOSYNC;
 	}
 
-	if (search) {
-		flags |= LDB_FLG_DONT_CREATE_DB;
-
-		if (options.show_binary) {
-			flags |= LDB_FLG_SHOW_BINARY;
-		}
+	if (options.show_binary) {
+		flags |= LDB_FLG_SHOW_BINARY;
 	}
 
 	if (options.tracing) {
@@ -320,20 +315,6 @@ failed:
 	talloc_free(ret);
 	exit(LDB_ERR_OPERATIONS_ERROR);
 	return NULL;
-}
-
-struct ldb_cmdline *ldb_cmdline_process_search(struct ldb_context *ldb,
-					       int argc, const char **argv,
-					       void (*usage)(struct ldb_context *))
-{
-	return ldb_cmdline_process_internal(ldb, argc, argv, usage, true);
-}
-
-struct ldb_cmdline *ldb_cmdline_process(struct ldb_context *ldb,
-					int argc, const char **argv,
-					void (*usage)(struct ldb_context *))
-{
-	return ldb_cmdline_process_internal(ldb, argc, argv, usage, false);
 }
 
 /* this function check controls reply and determines if more

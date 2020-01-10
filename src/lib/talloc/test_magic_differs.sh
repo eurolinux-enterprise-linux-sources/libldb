@@ -4,12 +4,10 @@
 
 echo "test: magic differs"
 
-helper=$1
-m1=$($helper)
-m2=$($helper)
-
-if [ $m1 -eq $m2 ]; then
-	echo "failure: magic remained the same between executions ($m1 vs $m2)"
+if [
+	"`./talloc_test_magic_differs_helper`" != "`./talloc_test_magic_differs_helper`"
+]; then
+	echo "failure: magic remained the same between executions"
 	exit 1
 fi
 

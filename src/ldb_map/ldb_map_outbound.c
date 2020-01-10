@@ -190,7 +190,7 @@ static int map_attrs_partition(struct ldb_module *module, void *mem_ctx, const c
 static int ldb_msg_replace(struct ldb_message *msg, const struct ldb_message_element *el)
 {
 	struct ldb_message_element *old;
-	unsigned j;
+	int j;
 	old = ldb_msg_find_element(msg, el->name);
 
 	/* no local result, add as new element */
@@ -330,8 +330,7 @@ static int ldb_msg_el_merge(struct ldb_module *module, struct ldb_message *local
 				  attr_name);
 			return LDB_SUCCESS;
 		}
-
-		FALL_THROUGH;
+		/* fall through */
 	case LDB_MAP_KEEP:
 	case LDB_MAP_RENAME:
 	case LDB_MAP_RENDROP:

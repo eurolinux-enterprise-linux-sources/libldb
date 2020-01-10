@@ -323,10 +323,8 @@ static int epoll_add_multiplex_fd(struct epoll_event_context *epoll_ev,
 			     "add_fde[%p] mpx_fde[%p] fd[%d] - disabling\n",
 			     add_fde, mpx_fde, add_fde->fd);
 		DLIST_REMOVE(epoll_ev->ev->fd_events, mpx_fde);
-		mpx_fde->wrapper = NULL;
 		mpx_fde->event_ctx = NULL;
 		DLIST_REMOVE(epoll_ev->ev->fd_events, add_fde);
-		add_fde->wrapper = NULL;
 		add_fde->event_ctx = NULL;
 		return 0;
 	} else if (ret != 0) {
@@ -389,11 +387,9 @@ static void epoll_add_event(struct epoll_event_context *epoll_ev, struct tevent_
 			     "fde[%p] mpx_fde[%p] fd[%d] - disabling\n",
 			     fde, mpx_fde, fde->fd);
 		DLIST_REMOVE(epoll_ev->ev->fd_events, fde);
-		fde->wrapper = NULL;
 		fde->event_ctx = NULL;
 		if (mpx_fde != NULL) {
 			DLIST_REMOVE(epoll_ev->ev->fd_events, mpx_fde);
-			mpx_fde->wrapper = NULL;
 			mpx_fde->event_ctx = NULL;
 		}
 		return;
@@ -466,11 +462,9 @@ static void epoll_del_event(struct epoll_event_context *epoll_ev, struct tevent_
 			     "fde[%p] mpx_fde[%p] fd[%d] - disabling\n",
 			     fde, mpx_fde, fde->fd);
 		DLIST_REMOVE(epoll_ev->ev->fd_events, fde);
-		fde->wrapper = NULL;
 		fde->event_ctx = NULL;
 		if (mpx_fde != NULL) {
 			DLIST_REMOVE(epoll_ev->ev->fd_events, mpx_fde);
-			mpx_fde->wrapper = NULL;
 			mpx_fde->event_ctx = NULL;
 		}
 		return;
@@ -517,11 +511,9 @@ static void epoll_mod_event(struct epoll_event_context *epoll_ev, struct tevent_
 			     "fde[%p] mpx_fde[%p] fd[%d] - disabling\n",
 			     fde, mpx_fde, fde->fd);
 		DLIST_REMOVE(epoll_ev->ev->fd_events, fde);
-		fde->wrapper = NULL;
 		fde->event_ctx = NULL;
 		if (mpx_fde != NULL) {
 			DLIST_REMOVE(epoll_ev->ev->fd_events, mpx_fde);
-			mpx_fde->wrapper = NULL;
 			mpx_fde->event_ctx = NULL;
 		}
 		return;
@@ -733,7 +725,8 @@ static int epoll_event_loop(struct epoll_event_context *epoll_ev, struct timeval
 		 */
 		flags &= fde->flags;
 		if (flags) {
-			return tevent_common_invoke_fd_handler(fde, flags, NULL);
+			fde->handler(epoll_ev->ev, fde, flags, fde->private_data);
+			break;
 		}
 	}
 
@@ -908,10 +901,6 @@ static int epoll_event_loop_once(struct tevent_context *ev, const char *location
 	if (ev->signal_events &&
 	    tevent_common_check_signal(ev)) {
 		return 0;
-	}
-
-	if (ev->threaded_contexts != NULL) {
-		tevent_common_threaded_activate_immediate(ev);
 	}
 
 	if (ev->immediate_events &&

@@ -600,7 +600,8 @@ static int port_event_loop(struct port_event_context *port_ev, struct timeval *t
 		 */
 		flags &= fde->flags;
 		if (flags) {
-			return tevent_common_invoke_fd_handler(fde, flags, NULL);
+			fde->handler(ev, fde, flags, fde->private_data);
+			break;
 		}
 	}
 
@@ -757,10 +758,6 @@ static int port_event_loop_once(struct tevent_context *ev, const char *location)
 	if (ev->signal_events &&
 	    tevent_common_check_signal(ev)) {
 		return 0;
-	}
-
-	if (ev->threaded_contexts != NULL) {
-		tevent_common_threaded_activate_immediate(ev);
 	}
 
 	if (ev->immediate_events &&

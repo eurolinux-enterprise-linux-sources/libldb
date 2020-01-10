@@ -187,7 +187,7 @@ static struct tevent_queue_entry *tevent_queue_add_internal(
 
 	if (req->async.fn != NULL) {
 		/*
-		 * If the caller wants to optimize for the
+		 * If the callers wants to optimize for the
 		 * empty queue case, call the trigger only
 		 * if there is no callback defined for the
 		 * request yet.
@@ -264,19 +264,6 @@ struct tevent_queue_entry *tevent_queue_add_optimize_empty(
 {
 	return tevent_queue_add_internal(queue, ev, req,
 					 trigger, private_data, true);
-}
-
-void tevent_queue_entry_untrigger(struct tevent_queue_entry *entry)
-{
-	if (entry->queue->running) {
-		abort();
-	}
-
-	if (entry->queue->list != entry) {
-		abort();
-	}
-
-	entry->triggered = false;
 }
 
 void tevent_queue_start(struct tevent_queue *queue)
