@@ -8,7 +8,7 @@
 %define tevent_version 0.9.24
 
 Name: libldb
-Version: 1.2.2
+Version: 1.3.4
 Release: 1%{?dist}
 Group: Development/Libraries
 Summary: A schema-less, ldap like, API and database
@@ -179,6 +179,15 @@ rm -rf %{buildroot}
 %postun -n pyldb -p /sbin/ldconfig
 
 %changelog
+* Wed Jun 27 2018 Jakub Hrozek <jhrozek@redhat.com> - 1.3.4-1
+- Resolves: rhbz#1558497 - Rebase libldb to enable samba rebase
+
+* Thu May  3 2018 Jakub Hrozek <jhrozek@redhat.com> - 1.3.3-1
+- Resolves: rhbz#1558497 - Rebase libldb to enable samba rebase
+
+* Tue Apr 10 2018 Jakub Hrozek <jhrozek@redhat.com> - 1.3.2-1
+- Resolves: rhbz#1558497 - Rebase libldb to enable samba rebase
+
 * Sun Oct 15 2017 Jakub Hrozek <jhrozek@redhat.com> - 1.2.2-1
 - Resolves: rhbz#1470056 - Rebase libldb to enable samba rebase to
                            version 4.7.x
